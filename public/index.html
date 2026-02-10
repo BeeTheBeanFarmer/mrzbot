@@ -1328,13 +1328,24 @@
                                 'function claim(uint256) payable',
                                 'function claim() payable',
                                 'function mintPublic(uint256) payable',
-                                'function mintNFT(uint256) payable'
+                                'function mintNFT(uint256) payable',
+                                'function purchase(uint256) payable',
+                                'function buy(uint256) payable'
                             ];
                             const contract = new ethers.Contract(task.contract, abi, wallet);
                             const opts = { value: ethers.utils.parseEther(task.value || '0') };
                             if (task.gasLimit !== 'auto') opts.gasLimit = parseInt(task.gasLimit);
                             if (task.maxFee) opts.maxFeePerGas = ethers.utils.parseUnits(task.maxFee, 'gwei');
                             if (task.priorityFee) opts.maxPriorityFeePerGas = ethers.utils.parseUnits(task.priorityFee, 'gwei');
+
+                            // SeaDrop contract addresses (Ethereum mainnet)
+                            const SEADROP_ADDRESSES = [
+                                '0x00005EA00Ac477B1030CE78506496e8C2dE24bf5', // SeaDrop 1.0
+                                '0x0000000000a39bb272e79075ade125fd351887ac'  // OpenSea SeaDrop
+                            ];
+                            const seaDropAbi = [
+                                'function mintPublic(address nftContract, address feeRecipient, address minterIfNotPayer, uint256 quantity) payable'
+                            ];
 
                             // Try multiple mint function patterns
                             const mintFunctions = [
@@ -1346,8 +1357,18 @@
                                 () => contract['claim()'](opts),
                                 () => contract['mintPublic(uint256)'](1, opts),
                                 () => contract['mintNFT(uint256)'](1, opts),
-                                () => contract['safeMint(address,uint256)'](walletAddr, 1, opts)
+                                () => contract['safeMint(address,uint256)'](walletAddr, 1, opts),
+                                () => contract['purchase(uint256)'](1, opts),
+                                () => contract['buy(uint256)'](1, opts)
                             ];
+
+                            // Add SeaDrop mint attempts
+                            for (const seaDropAddr of SEADROP_ADDRESSES) {
+                                const seaDrop = new ethers.Contract(seaDropAddr, seaDropAbi, wallet);
+                                mintFunctions.push(
+                                    () => seaDrop.mintPublic(task.contract, ethers.constants.AddressZero, walletAddr, 1, opts)
+                                );
+                            }
 
                             for (const mintFn of mintFunctions) {
                                 try {
