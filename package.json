@@ -1,0 +1,30 @@
+{
+  "name": "mint-bot",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "scripts": {
+    "dev": "npx serve public -l 3000",
+    "mint": "node bot.js mint",
+    "auto": "node bot.js auto",
+    "batch": "node bot.js batch",
+    "disperse": "node bot.js disperse",
+    "generate": "node bot.js generate",
+    "multi": "node bot.js multi"
+  },
+  "keywords": [
+    "nft",
+    "mint",
+    "bot",
+    "ethereum"
+  ],
+  "author": "",
+  "license": "ISC",
+  "description": "NFT minting bot with auto-mint, batch mint, and fund dispersal",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "ethers": "^5.7.2"
+  },
+  "devDependencies": {
+    "serve": "^14.2.5"
+  }
+}
