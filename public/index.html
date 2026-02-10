@@ -779,6 +779,25 @@
             { chain: 137, name: 'Polygon Official', url: 'https://polygon-rpc.com' },
         ];
 
+        // RPC fallback helper - tries multiple RPCs for a chain
+        async function getWorkingProvider(chainId, primaryRpc = null) {
+            const chainRpcs = rpcs.filter(r => r.chain === chainId);
+            if (primaryRpc) {
+                chainRpcs.unshift({ url: primaryRpc, chain: chainId, name: 'Primary' });
+            }
+            for (const rpc of chainRpcs) {
+                try {
+                    const p = new ethers.providers.JsonRpcProvider(rpc.url, chainId);
+                    await p.getBlockNumber();
+                    return p;
+                } catch (e) {
+                    console.warn(`RPC ${rpc.name || rpc.url} failed, trying next...`);
+                    continue;
+                }
+            }
+            throw new Error(`No working RPC found for chain ${chainId}`);
+        }
+
         // ==================== STATE ====================
         let provider = null;
         let signer = null;
@@ -1268,8 +1287,8 @@
             // Get wallets that haven't succeeded yet
             const pendingWallets = task.wallets.filter(idx => !task.successWallets?.includes(idx));
 
-            // Simulation mode: keep trying until all succeed or stopped
-            const maxAttempts = task.simulate ? 999999 : 1;
+            // Simulation mode: keep trying until all succeed or stopped (max 1000 attempts)
+            const maxAttempts = task.simulate ? 1000 : 1;
 
             for (let attempt = 0; attempt < maxAttempts && runningTasks[taskId]; attempt++) {
                 task.attempts = attempt + 1;
@@ -1299,18 +1318,46 @@
                             if (task.nonce !== 'auto') txParams.nonce = parseInt(task.nonce);
                             tx = await wallet.sendTransaction(txParams);
                         } else {
-                            const abi = ['function mint(uint256) payable', 'function mint() payable'];
+                            // Extended ABI with common mint function patterns
+                            const abi = [
+                                'function mint(uint256) payable',
+                                'function mint() payable',
+                                'function publicMint(uint256) payable',
+                                'function publicMint() payable',
+                                'function safeMint(address,uint256) payable',
+                                'function claim(uint256) payable',
+                                'function claim() payable',
+                                'function mintPublic(uint256) payable',
+                                'function mintNFT(uint256) payable'
+                            ];
                             const contract = new ethers.Contract(task.contract, abi, wallet);
                             const opts = { value: ethers.utils.parseEther(task.value || '0') };
                             if (task.gasLimit !== 'auto') opts.gasLimit = parseInt(task.gasLimit);
                             if (task.maxFee) opts.maxFeePerGas = ethers.utils.parseUnits(task.maxFee, 'gwei');
                             if (task.priorityFee) opts.maxPriorityFeePerGas = ethers.utils.parseUnits(task.priorityFee, 'gwei');
 
-                            try {
-                                tx = await contract['mint(uint256)'](1, opts);
-                            } catch {
-                                tx = await contract['mint()'](opts);
+                            // Try multiple mint function patterns
+                            const mintFunctions = [
+                                () => contract['mint(uint256)'](1, opts),
+                                () => contract['mint()'](opts),
+                                () => contract['publicMint(uint256)'](1, opts),
+                                () => contract['publicMint()'](opts),
+                                () => contract['claim(uint256)'](1, opts),
+                                () => contract['claim()'](opts),
+                                () => contract['mintPublic(uint256)'](1, opts),
+                                () => contract['mintNFT(uint256)'](1, opts),
+                                () => contract['safeMint(address,uint256)'](walletAddr, 1, opts)
+                            ];
+
+                            for (const mintFn of mintFunctions) {
+                                try {
+                                    tx = await mintFn();
+                                    break;
+                                } catch (e) {
+                                    continue;
+                                }
                             }
+                            if (!tx) throw new Error('No compatible mint function found on contract');
                         }
 
                         addLog('pending', `TX sent: ${w.address.slice(0,8)}...`, tx.hash);
