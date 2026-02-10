@@ -787,8 +787,9 @@
             }
             for (const rpc of chainRpcs) {
                 try {
-                    const p = new ethers.providers.JsonRpcProvider(rpc.url, chainId);
-                    await p.getBlockNumber();
+                    // Use StaticJsonRpcProvider to avoid network detection issues
+                    const p = new ethers.providers.StaticJsonRpcProvider(rpc.url, chainId);
+                    await p.getBlockNumber(); // Quick connection test
                     return p;
                 } catch (e) {
                     console.warn(`RPC ${rpc.name || rpc.url} failed, trying next...`);
@@ -1281,7 +1282,27 @@
             renderTasks();
             renderTaskGroups();
 
-            const p = new ethers.providers.JsonRpcProvider(task.rpc, task.chain);
+            // Use StaticJsonRpcProvider to avoid network detection issues
+            let p;
+            try {
+                // Try primary RPC first with static provider (no network check)
+                p = new ethers.providers.StaticJsonRpcProvider(task.rpc, task.chain);
+                await p.getBlockNumber(); // Quick test
+            } catch (e) {
+                // Fallback to other RPCs for this chain
+                try {
+                    p = await getWorkingProvider(task.chain, task.rpc);
+                } catch (e2) {
+                    task.status = 'failed';
+                    addLog('error', `RPC failed for chain ${task.chain}: ${e2.message}`);
+                    group.failed++;
+                    delete runningTasks[taskId];
+                    renderTasks();
+                    renderTaskGroups();
+                    saveData();
+                    return;
+                }
+            }
             let successCount = 0;
 
             // Get wallets that haven't succeeded yet
