@@ -532,10 +532,10 @@
                     <div class="form-group" style="grid-column: 1 / -1;">
                         <label>Gas Presets</label>
                         <div class="btn-group" style="margin-top: 4px;">
-                            <button type="button" class="btn btn-sm gas-preset" data-preset="normal" onclick="setGasPreset('normal', this)">Normal</button>
-                            <button type="button" class="btn btn-sm gas-preset" data-preset="fast" onclick="setGasPreset('fast', this)">Fast</button>
-                            <button type="button" class="btn btn-sm gas-preset" data-preset="turbo" onclick="setGasPreset('turbo', this)" style="background: var(--warning); border-color: var(--warning); color: #000;">Turbo</button>
-                            <button type="button" class="btn btn-sm gas-preset" data-preset="instant" onclick="setGasPreset('instant', this)" style="background: var(--error); border-color: var(--error); color: #fff;">Instant</button>
+                            <button type="button" class="btn btn-sm gas-preset" data-preset="normal" onclick="setGasPreset('normal', this)" style="min-height:42px;line-height:1.2;">Normal<br><span style="font-size:0.65rem;opacity:0.8">~$0.50</span></button>
+                            <button type="button" class="btn btn-sm gas-preset" data-preset="fast" onclick="setGasPreset('fast', this)" style="min-height:42px;line-height:1.2;">Fast<br><span style="font-size:0.65rem;opacity:0.8">~$1</span></button>
+                            <button type="button" class="btn btn-sm gas-preset" data-preset="turbo" onclick="setGasPreset('turbo', this)" style="background: var(--warning); border-color: var(--warning); color: #000; min-height:42px;line-height:1.2;">Turbo<br><span style="font-size:0.65rem;opacity:0.8">~$2</span></button>
+                            <button type="button" class="btn btn-sm gas-preset" data-preset="instant" onclick="setGasPreset('instant', this)" style="background: var(--error); border-color: var(--error); color: #fff; min-height:42px;line-height:1.2;">Instant<br><span style="font-size:0.65rem;opacity:0.8">~$4</span></button>
                         </div>
                     </div>
                 </div>
@@ -748,6 +748,25 @@
             <div class="modal-footer">
                 <button class="btn" onclick="closeModal('sendModal')">Cancel</button>
                 <button class="btn btn-primary" onclick="executeSend()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Balance Check Modal -->
+    <div class="modal-overlay" id="balanceCheckModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Insufficient Funds</h3>
+                <button class="modal-close" onclick="closeModal('balanceCheckModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="margin-bottom:12px;color:var(--warning);">Some wallets don't have enough ETH for this mint:</p>
+                <div id="balanceCheckList" style="max-height:200px;overflow-y:auto;margin-bottom:16px;"></div>
+                <p style="font-size:0.85rem;color:var(--text-muted);" id="balanceCheckSummary"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeModal('balanceCheckModal')">Cancel</button>
+                <button class="btn btn-primary" id="balanceCheckProceed" onclick="proceedWithFundedWallets()">Mint with Funded Only</button>
             </div>
         </div>
     </div>
@@ -1221,11 +1240,13 @@
 
         // Gas presets for different speed tiers
         const GAS_PRESETS = {
-            normal: { maxFee: '', priorityFee: '' }, // Auto - let network decide
-            fast: { maxFee: '50', priorityFee: '2' },
-            turbo: { maxFee: '100', priorityFee: '5' },
-            instant: { maxFee: '200', priorityFee: '10' }
+            normal: { maxFee: '', priorityFee: '', usd: '~$0.50' },
+            fast: { maxFee: '50', priorityFee: '2', usd: '~$1' },
+            turbo: { maxFee: '100', priorityFee: '5', usd: '~$2' },
+            instant: { maxFee: '200', priorityFee: '10', usd: '~$4' }
         };
+
+        let ethPriceUsd = 2500; // Default, will be updated
 
         function setGasPreset(preset, btn) {
             const p = GAS_PRESETS[preset];
@@ -1237,6 +1258,24 @@
             if (btn) btn.classList.add('active');
         }
 
+        // Fetch ETH price for USD estimates
+        async function fetchEthPrice() {
+            try {
+                const resp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
+                const data = await resp.json();
+                ethPriceUsd = data.ethereum?.usd || 2500;
+            } catch (e) {
+                console.warn('Could not fetch ETH price:', e);
+            }
+        }
+
+        // Calculate gas cost in USD (assuming 150k gas for NFT mint)
+        function calcGasCostUsd(maxFeeGwei) {
+            const gasLimit = 150000; // Typical NFT mint
+            const gasCostEth = (maxFeeGwei * gasLimit) / 1e9;
+            return gasCostEth * ethPriceUsd;
+        }
+
         // Fetch current gas prices and update presets dynamically
         async function updateGasPresets() {
             try {
@@ -1246,16 +1285,43 @@
                 const feeData = await provider.getFeeData();
                 const baseGwei = parseFloat(ethers.utils.formatUnits(feeData.maxFeePerGas || feeData.gasPrice, 'gwei'));
 
+                // Fetch ETH price if not recently fetched
+                await fetchEthPrice();
+
                 // Update presets based on current network conditions
-                GAS_PRESETS.fast.maxFee = Math.ceil(baseGwei * 1.2).toString();
+                const normalGwei = Math.ceil(baseGwei);
+                const fastGwei = Math.ceil(baseGwei * 1.2);
+                const turboGwei = Math.ceil(baseGwei * 1.5);
+                const instantGwei = Math.ceil(baseGwei * 2);
+
+                GAS_PRESETS.normal.maxFee = '';
+                GAS_PRESETS.normal.usd = `~$${calcGasCostUsd(normalGwei).toFixed(2)}`;
+                GAS_PRESETS.fast.maxFee = fastGwei.toString();
                 GAS_PRESETS.fast.priorityFee = '2';
-                GAS_PRESETS.turbo.maxFee = Math.ceil(baseGwei * 1.5).toString();
+                GAS_PRESETS.fast.usd = `~$${calcGasCostUsd(fastGwei).toFixed(2)}`;
+                GAS_PRESETS.turbo.maxFee = turboGwei.toString();
                 GAS_PRESETS.turbo.priorityFee = '5';
-                GAS_PRESETS.instant.maxFee = Math.ceil(baseGwei * 2).toString();
+                GAS_PRESETS.turbo.usd = `~$${calcGasCostUsd(turboGwei).toFixed(2)}`;
+                GAS_PRESETS.instant.maxFee = instantGwei.toString();
                 GAS_PRESETS.instant.priorityFee = '10';
+                GAS_PRESETS.instant.usd = `~$${calcGasCostUsd(instantGwei).toFixed(2)}`;
+
+                // Update button labels with USD estimates
+                updateGasPresetButtons();
             } catch (e) {
                 console.warn('Could not fetch gas prices:', e);
             }
+        }
+
+        function updateGasPresetButtons() {
+            const btns = document.querySelectorAll('.gas-preset');
+            btns.forEach(btn => {
+                const preset = btn.dataset.preset;
+                if (preset && GAS_PRESETS[preset]) {
+                    const label = preset.charAt(0).toUpperCase() + preset.slice(1);
+                    btn.innerHTML = `${label}<br><span style="font-size:0.65rem;opacity:0.8">${GAS_PRESETS[preset].usd}</span>`;
+                }
+            });
         }
 
         function populateTransferSelect() {
@@ -1268,25 +1334,55 @@
             document.getElementById('modeHex').classList.toggle('btn-primary', mode === 'hex');
         }
 
-        function createTask() {
+        // Stored for balance check flow
+        let pendingTaskData = null;
+        let fundedWalletIndices = [];
+
+        async function createTask() {
             const group = taskGroups.find(g => g.id === selectedTaskGroup);
             if (!group) return;
 
             const walletIndices = Array.from(document.getElementById('taskWallets').selectedOptions).map(o => parseInt(o.value));
             if (walletIndices.length === 0) return showNotif('error', 'Select wallets');
 
-            const task = {
+            const mintValue = parseFloat(document.getElementById('taskValue').value || '0');
+            const chainId = parseInt(document.getElementById('taskChain').value);
+            const maxFeeGwei = parseFloat(document.getElementById('taskMaxFee').value || '30');
+            const gasLimit = parseInt(document.getElementById('taskGasLimit').value) || 150000;
+            const estimatedGasEth = (maxFeeGwei * gasLimit) / 1e9;
+            const requiredEth = mintValue + estimatedGasEth + 0.001; // Add small buffer
+
+            // Check balances
+            const rpcUrl = document.getElementById('taskRPC').value;
+            const provider = new ethers.providers.StaticJsonRpcProvider(rpcUrl, chainId);
+
+            const balanceChecks = await Promise.all(walletIndices.map(async (idx) => {
+                const w = wallets[idx];
+                try {
+                    const balance = await provider.getBalance(w.address);
+                    const balanceEth = parseFloat(ethers.utils.formatEther(balance));
+                    return { idx, address: w.address, balance: balanceEth, required: requiredEth, funded: balanceEth >= requiredEth };
+                } catch (e) {
+                    return { idx, address: w.address, balance: 0, required: requiredEth, funded: false, error: true };
+                }
+            }));
+
+            const underfunded = balanceChecks.filter(c => !c.funded);
+            const funded = balanceChecks.filter(c => c.funded);
+
+            // Build task data
+            const taskData = {
                 id: Date.now().toString(),
                 groupId: selectedTaskGroup,
                 contract: group.contract,
-                chain: parseInt(document.getElementById('taskChain').value),
+                chain: chainId,
                 wallets: walletIndices,
                 value: document.getElementById('taskValue').value || '0',
                 gasLimit: document.getElementById('taskGasLimit').value || 'auto',
                 maxFee: document.getElementById('taskMaxFee').value || '',
                 priorityFee: document.getElementById('taskPriorityFee').value || '',
                 nonce: document.getElementById('taskNonce').value || 'auto',
-                rpc: document.getElementById('taskRPC').value,
+                rpc: rpcUrl,
                 simInterval: parseInt(document.getElementById('taskSimInterval').value) || 50,
                 startTime: document.getElementById('taskStartTime').value || null,
                 hex: document.getElementById('taskHex').value.trim() || '',
@@ -1295,6 +1391,47 @@
                 status: 'pending',
                 results: []
             };
+
+            if (underfunded.length > 0 && funded.length > 0) {
+                // Some wallets underfunded - show modal
+                pendingTaskData = taskData;
+                fundedWalletIndices = funded.map(c => c.idx);
+
+                const list = document.getElementById('balanceCheckList');
+                list.innerHTML = underfunded.map(c => `
+                    <div style="display:flex;justify-content:space-between;padding:8px;background:var(--bg-tertiary);border-radius:6px;margin-bottom:6px;font-size:0.8rem;">
+                        <span style="font-family:monospace;">${c.address.slice(0,8)}...${c.address.slice(-4)}</span>
+                        <span style="color:var(--error);">${c.balance.toFixed(4)} ETH (need ${c.required.toFixed(4)})</span>
+                    </div>
+                `).join('');
+
+                document.getElementById('balanceCheckSummary').textContent = `${funded.length} of ${walletIndices.length} wallets have enough funds.`;
+                document.getElementById('balanceCheckProceed').textContent = `Mint with ${funded.length} Funded Wallet${funded.length > 1 ? 's' : ''}`;
+
+                document.getElementById('balanceCheckModal').classList.add('show');
+                return;
+            } else if (underfunded.length > 0 && funded.length === 0) {
+                // All wallets underfunded
+                showNotif('error', `No wallets have enough ETH. Need ${requiredEth.toFixed(4)} ETH each.`);
+                return;
+            }
+
+            // All wallets funded - proceed
+            finalizeTask(taskData);
+        }
+
+        function proceedWithFundedWallets() {
+            if (!pendingTaskData || fundedWalletIndices.length === 0) return;
+            pendingTaskData.wallets = fundedWalletIndices;
+            finalizeTask(pendingTaskData);
+            closeModal('balanceCheckModal');
+            pendingTaskData = null;
+            fundedWalletIndices = [];
+        }
+
+        function finalizeTask(task) {
+            const group = taskGroups.find(g => g.id === task.groupId);
+            if (!group) return;
 
             tasks.push(task);
             group.pending++;
