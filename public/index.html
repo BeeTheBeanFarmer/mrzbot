@@ -1347,15 +1347,23 @@
 
             const mintValue = parseFloat(document.getElementById('taskValue').value || '0');
             const chainId = parseInt(document.getElementById('taskChain').value);
-            const maxFeeGwei = parseFloat(document.getElementById('taskMaxFee').value || '30');
-            const gasLimit = parseInt(document.getElementById('taskGasLimit').value) || 150000;
-            const estimatedGasEth = (maxFeeGwei * gasLimit) / 1e9;
-            const requiredEth = mintValue + estimatedGasEth + 0.001; // Add small buffer
-
-            // Check balances
             const rpcUrl = document.getElementById('taskRPC').value;
             const provider = new ethers.providers.StaticJsonRpcProvider(rpcUrl, chainId);
 
+            // Get actual gas price for accurate estimate
+            let maxFeeGwei;
+            try {
+                const feeData = await provider.getFeeData();
+                maxFeeGwei = parseFloat(ethers.utils.formatUnits(feeData.maxFeePerGas || feeData.gasPrice, 'gwei'));
+            } catch (e) {
+                maxFeeGwei = parseFloat(document.getElementById('taskMaxFee').value || '10'); // Low default
+            }
+
+            const gasLimit = 120000; // Typical NFT mint gas
+            const estimatedGasEth = (maxFeeGwei * gasLimit) / 1e9;
+            const requiredEth = mintValue + estimatedGasEth + 0.0005; // Small buffer
+
+            // Check balances (reuse provider from above)
             const balanceChecks = await Promise.all(walletIndices.map(async (idx) => {
                 const w = wallets[idx];
                 try {
