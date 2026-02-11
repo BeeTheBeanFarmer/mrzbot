@@ -140,6 +140,7 @@
         .btn-primary:hover { background: var(--accent-hover); }
         .btn-danger { background: rgba(239,68,68,0.2); border-color: var(--error); color: var(--error); }
         .btn-sm { padding: 5px 10px; font-size: 0.75rem; }
+        .gas-preset.active { outline: 2px solid var(--accent); outline-offset: 1px; }
         .btn-group { display: flex; gap: 8px; }
 
         /* Toggle */
@@ -524,6 +525,17 @@
                         <div class="input-suffix">
                             <input type="text" id="taskValue" placeholder="0" value="0">
                             <span>ETH</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-row" style="margin-bottom: 8px;">
+                    <div class="form-group" style="grid-column: 1 / -1;">
+                        <label>Gas Presets</label>
+                        <div class="btn-group" style="margin-top: 4px;">
+                            <button type="button" class="btn btn-sm gas-preset" onclick="setGasPreset('normal')">Normal</button>
+                            <button type="button" class="btn btn-sm gas-preset" onclick="setGasPreset('fast')">Fast</button>
+                            <button type="button" class="btn btn-sm gas-preset" onclick="setGasPreset('turbo')" style="background: var(--warning); border-color: var(--warning); color: #000;">Turbo</button>
+                            <button type="button" class="btn btn-sm gas-preset" onclick="setGasPreset('instant')" style="background: var(--error); border-color: var(--error); color: #fff;">Instant</button>
                         </div>
                     </div>
                 </div>
@@ -1068,7 +1080,9 @@
             document.getElementById('taskHex').value = '';
             document.getElementById('simulateToggle').classList.remove('active');
             document.getElementById('taskChain').value = currentNetwork;
+            document.querySelectorAll('.gas-preset').forEach(btn => btn.classList.remove('active'));
             populateWalletGroupSelect();
+            updateGasPresets(); // Fetch current gas prices
             populateRPCSelect();
             populateTransferSelect();
             document.getElementById('createTaskModal').classList.add('show');
@@ -1202,6 +1216,46 @@
 
         function updateTaskRPCs() {
             populateRPCSelect();
+            updateGasPresets(); // Update gas prices for new chain
+        }
+
+        // Gas presets for different speed tiers
+        const GAS_PRESETS = {
+            normal: { maxFee: '', priorityFee: '' }, // Auto - let network decide
+            fast: { maxFee: '50', priorityFee: '2' },
+            turbo: { maxFee: '100', priorityFee: '5' },
+            instant: { maxFee: '200', priorityFee: '10' }
+        };
+
+        function setGasPreset(preset) {
+            const p = GAS_PRESETS[preset];
+            if (!p) return;
+            document.getElementById('taskMaxFee').value = p.maxFee;
+            document.getElementById('taskPriorityFee').value = p.priorityFee;
+            // Highlight selected preset
+            document.querySelectorAll('.gas-preset').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+        }
+
+        // Fetch current gas prices and update presets dynamically
+        async function updateGasPresets() {
+            try {
+                const chainId = parseInt(document.getElementById('taskChain')?.value || '1');
+                const rpcUrl = rpcs.find(r => r.chain === chainId)?.url || DEFAULT_RPCS[0].url;
+                const provider = new ethers.providers.StaticJsonRpcProvider(rpcUrl, chainId);
+                const feeData = await provider.getFeeData();
+                const baseGwei = parseFloat(ethers.utils.formatUnits(feeData.maxFeePerGas || feeData.gasPrice, 'gwei'));
+
+                // Update presets based on current network conditions
+                GAS_PRESETS.fast.maxFee = Math.ceil(baseGwei * 1.2).toString();
+                GAS_PRESETS.fast.priorityFee = '2';
+                GAS_PRESETS.turbo.maxFee = Math.ceil(baseGwei * 1.5).toString();
+                GAS_PRESETS.turbo.priorityFee = '5';
+                GAS_PRESETS.instant.maxFee = Math.ceil(baseGwei * 2).toString();
+                GAS_PRESETS.instant.priorityFee = '10';
+            } catch (e) {
+                console.warn('Could not fetch gas prices:', e);
+            }
         }
 
         function populateTransferSelect() {
@@ -1305,8 +1359,36 @@
             }
             let successCount = 0;
 
-            // Get wallets that haven't succeeded yet
-            const pendingWallets = task.wallets.filter(idx => !task.successWallets?.includes(idx));
+            // Default gas limit fallback for NFT mints when estimation fails
+            const FALLBACK_GAS_LIMIT = 300000;
+
+            // Extended ABI with common mint function patterns (defined once)
+            const mintAbi = [
+                'function mint(uint256) payable',
+                'function mint() payable',
+                'function publicMint(uint256) payable',
+                'function publicMint() payable',
+                'function safeMint(address,uint256) payable',
+                'function claim(uint256) payable',
+                'function claim() payable',
+                'function mintPublic(uint256) payable',
+                'function mintNFT(uint256) payable',
+                'function purchase(uint256) payable',
+                'function buy(uint256) payable'
+            ];
+
+            // SeaDrop contract addresses
+            const SEADROP_ADDRESSES = [
+                '0x00005EA00Ac477B1030CE78506496e8C2dE24bf5', // SeaDrop 1.0
+                '0x0000000000a39bb272e79075ade125fd351887ac'  // OpenSea SeaDrop
+            ];
+            const seaDropAbi = [
+                'function mintPublic(address nftContract, address feeRecipient, address minterIfNotPayer, uint256 quantity) payable'
+            ];
+
+            // Cache for detected mint function (reuse across wallets)
+            let detectedMintFn = null;
+            let detectedMintType = null; // 'direct', 'seadrop', or 'hex'
 
             // Simulation mode: keep trying until all succeed or stopped (max 1000 attempts)
             const maxAttempts = task.simulate ? 1000 : 1;
@@ -1318,93 +1400,143 @@
                 const stillPending = task.wallets.filter(idx => !task.successWallets?.includes(idx));
                 if (stillPending.length === 0) break; // All succeeded
 
-                // Try each pending wallet
+                // PRE-FETCH all nonces in parallel before sending TXs
+                // This prevents race conditions when multiple wallets query simultaneously
+                const nonceMap = {};
+                addLog('info', `Fetching nonces for ${stillPending.length} wallets...`);
+                await Promise.all(stillPending.map(async (walletIdx) => {
+                    const w = wallets[walletIdx];
+                    if (!w) return;
+                    try {
+                        const wallet = new ethers.Wallet(w.pk, p);
+                        nonceMap[walletIdx] = await wallet.getTransactionCount('pending');
+                    } catch (e) {
+                        nonceMap[walletIdx] = null; // Will auto-fetch later
+                    }
+                }));
+
+                // Fire ALL wallets simultaneously
                 const promises = stillPending.map(async (walletIdx) => {
                     const w = wallets[walletIdx];
                     if (!w) return false;
 
                     try {
                         const wallet = new ethers.Wallet(w.pk, p);
+                        const nonce = nonceMap[walletIdx];
                         let tx;
 
+                        // Build base transaction options
+                        const value = ethers.utils.parseEther(task.value || '0');
+                        const baseOpts = { value };
+
+                        // Use pre-fetched nonce if available
+                        if (nonce !== null) baseOpts.nonce = nonce;
+
+                        // Gas settings with fallback
+                        if (task.gasLimit && task.gasLimit !== 'auto') {
+                            baseOpts.gasLimit = parseInt(task.gasLimit);
+                        }
+                        if (task.maxFee) baseOpts.maxFeePerGas = ethers.utils.parseUnits(task.maxFee, 'gwei');
+                        if (task.priorityFee) baseOpts.maxPriorityFeePerGas = ethers.utils.parseUnits(task.priorityFee, 'gwei');
+
+                        // Helper to send TX with gas estimation fallback
+                        const sendWithFallback = async (txCall) => {
+                            try {
+                                return await txCall();
+                            } catch (e) {
+                                // If gas estimation failed, retry with fallback gas limit
+                                if (e.code === 'UNPREDICTABLE_GAS_LIMIT' || e.message?.includes('gas')) {
+                                    const optsWithGas = { ...baseOpts, gasLimit: FALLBACK_GAS_LIMIT };
+                                    // Need to rebuild the call with new opts - throw to use fallback path
+                                    throw { ...e, needsFallbackGas: true };
+                                }
+                                throw e;
+                            }
+                        };
+
                         if (task.hex) {
+                            // Direct hex calldata
                             const txParams = {
                                 to: task.contract,
                                 data: task.hex,
-                                value: ethers.utils.parseEther(task.value || '0')
+                                ...baseOpts
                             };
-                            if (task.gasLimit !== 'auto') txParams.gasLimit = parseInt(task.gasLimit);
-                            if (task.maxFee) txParams.maxFeePerGas = ethers.utils.parseUnits(task.maxFee, 'gwei');
-                            if (task.priorityFee) txParams.maxPriorityFeePerGas = ethers.utils.parseUnits(task.priorityFee, 'gwei');
-                            if (task.nonce !== 'auto') txParams.nonce = parseInt(task.nonce);
+                            if (!txParams.gasLimit) txParams.gasLimit = FALLBACK_GAS_LIMIT;
                             tx = await wallet.sendTransaction(txParams);
-                        } else {
-                            // Extended ABI with common mint function patterns
-                            const abi = [
-                                'function mint(uint256) payable',
-                                'function mint() payable',
-                                'function publicMint(uint256) payable',
-                                'function publicMint() payable',
-                                'function safeMint(address,uint256) payable',
-                                'function claim(uint256) payable',
-                                'function claim() payable',
-                                'function mintPublic(uint256) payable',
-                                'function mintNFT(uint256) payable',
-                                'function purchase(uint256) payable',
-                                'function buy(uint256) payable'
-                            ];
-                            const contract = new ethers.Contract(task.contract, abi, wallet);
-                            const opts = { value: ethers.utils.parseEther(task.value || '0') };
-                            if (task.gasLimit !== 'auto') opts.gasLimit = parseInt(task.gasLimit);
-                            if (task.maxFee) opts.maxFeePerGas = ethers.utils.parseUnits(task.maxFee, 'gwei');
-                            if (task.priorityFee) opts.maxPriorityFeePerGas = ethers.utils.parseUnits(task.priorityFee, 'gwei');
+                            detectedMintType = 'hex';
+                        } else if (detectedMintFn && detectedMintType) {
+                            // Reuse previously detected mint function for speed
+                            const opts = { ...baseOpts };
+                            if (!opts.gasLimit) opts.gasLimit = FALLBACK_GAS_LIMIT;
 
-                            // SeaDrop contract addresses (Ethereum mainnet)
-                            const SEADROP_ADDRESSES = [
-                                '0x00005EA00Ac477B1030CE78506496e8C2dE24bf5', // SeaDrop 1.0
-                                '0x0000000000a39bb272e79075ade125fd351887ac'  // OpenSea SeaDrop
-                            ];
-                            const seaDropAbi = [
-                                'function mintPublic(address nftContract, address feeRecipient, address minterIfNotPayer, uint256 quantity) payable'
-                            ];
-
-                            // Try multiple mint function patterns
-                            const mintFunctions = [
-                                () => contract['mint(uint256)'](1, opts),
-                                () => contract['mint()'](opts),
-                                () => contract['publicMint(uint256)'](1, opts),
-                                () => contract['publicMint()'](opts),
-                                () => contract['claim(uint256)'](1, opts),
-                                () => contract['claim()'](opts),
-                                () => contract['mintPublic(uint256)'](1, opts),
-                                () => contract['mintNFT(uint256)'](1, opts),
-                                () => contract['safeMint(address,uint256)'](wallet.address, 1, opts),
-                                () => contract['purchase(uint256)'](1, opts),
-                                () => contract['buy(uint256)'](1, opts)
-                            ];
-
-                            // Add SeaDrop mint attempts
-                            for (const seaDropAddr of SEADROP_ADDRESSES) {
-                                const seaDrop = new ethers.Contract(seaDropAddr, seaDropAbi, wallet);
-                                mintFunctions.push(
-                                    () => seaDrop.mintPublic(task.contract, ethers.constants.AddressZero, ethers.constants.AddressZero, 1, opts)
-                                );
+                            if (detectedMintType === 'seadrop') {
+                                const seaDrop = new ethers.Contract(detectedMintFn.address, seaDropAbi, wallet);
+                                tx = await seaDrop.mintPublic(task.contract, ethers.constants.AddressZero, ethers.constants.AddressZero, 1, opts);
+                            } else {
+                                const contract = new ethers.Contract(task.contract, mintAbi, wallet);
+                                tx = await contract[detectedMintFn.name](...detectedMintFn.args(wallet, opts));
                             }
+                        } else {
+                            // First wallet: detect which mint function works
+                            const contract = new ethers.Contract(task.contract, mintAbi, wallet);
+                            const opts = { ...baseOpts };
+                            if (!opts.gasLimit) opts.gasLimit = FALLBACK_GAS_LIMIT;
 
-                            for (const mintFn of mintFunctions) {
+                            // Define all mint function attempts
+                            const mintAttempts = [
+                                { name: 'mint(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                { name: 'mint()', args: (w, o) => [o], type: 'direct' },
+                                { name: 'publicMint(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                { name: 'publicMint()', args: (w, o) => [o], type: 'direct' },
+                                { name: 'claim(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                { name: 'claim()', args: (w, o) => [o], type: 'direct' },
+                                { name: 'mintPublic(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                { name: 'mintNFT(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                { name: 'safeMint(address,uint256)', args: (w, o) => [w.address, 1, o], type: 'direct' },
+                                { name: 'purchase(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                { name: 'buy(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                            ];
+
+                            // Try direct mint functions first
+                            for (const mint of mintAttempts) {
                                 try {
-                                    tx = await mintFn();
+                                    tx = await contract[mint.name](...mint.args(wallet, opts));
+                                    detectedMintFn = mint;
+                                    detectedMintType = 'direct';
+                                    addLog('info', `Detected mint function: ${mint.name}`);
                                     break;
                                 } catch (e) {
                                     continue;
                                 }
                             }
-                            if (!tx) throw new Error('No compatible mint function found on contract');
+
+                            // If no direct function worked, try SeaDrop
+                            if (!tx) {
+                                for (const seaDropAddr of SEADROP_ADDRESSES) {
+                                    try {
+                                        const seaDrop = new ethers.Contract(seaDropAddr, seaDropAbi, wallet);
+                                        tx = await seaDrop.mintPublic(task.contract, ethers.constants.AddressZero, ethers.constants.AddressZero, 1, opts);
+                                        detectedMintFn = { address: seaDropAddr };
+                                        detectedMintType = 'seadrop';
+                                        addLog('info', `Using SeaDrop at ${seaDropAddr.slice(0,10)}...`);
+                                        break;
+                                    } catch (e) {
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            if (!tx) throw new Error('No compatible mint function found');
                         }
 
                         addLog('pending', `TX sent: ${w.address.slice(0,8)}...`, tx.hash);
-                        await tx.wait();
-                        addLog('success', `Minted: ${w.address.slice(0,8)}...`, tx.hash);
+
+                        // Don't wait for confirmation - fire and track
+                        tx.wait().then(() => {
+                            addLog('success', `Confirmed: ${w.address.slice(0,8)}...`, tx.hash);
+                        }).catch((e) => {
+                            addLog('error', `TX failed: ${w.address.slice(0,8)}...`, tx.hash);
+                        });
 
                         task.successWallets = task.successWallets || [];
                         task.successWallets.push(walletIdx);
@@ -1416,9 +1548,8 @@
                         return true;
                     } catch (err) {
                         const errMsg = err.reason || err.message || 'Failed';
-                        // Only log first few failures to avoid spam
                         if (attempt < 3 || attempt % 100 === 0) {
-                            addLog('error', `[${attempt + 1}] ${w.address.slice(0,8)}: ${errMsg.slice(0,30)}`);
+                            addLog('error', `[${attempt + 1}] ${w.address.slice(0,8)}: ${errMsg.slice(0,50)}`);
                         }
                         return false;
                     }
