@@ -1619,29 +1619,18 @@
                             const opts = { ...baseOpts };
                             if (!opts.gasLimit) opts.gasLimit = FALLBACK_GAS_LIMIT;
 
-                            // Define all mint function attempts
-                            const mintAttempts = [
-                                { name: 'mint(uint256)', args: (w, o) => [1, o], type: 'direct' },
-                                { name: 'mint()', args: (w, o) => [o], type: 'direct' },
-                                { name: 'publicMint(uint256)', args: (w, o) => [1, o], type: 'direct' },
-                                { name: 'publicMint()', args: (w, o) => [o], type: 'direct' },
-                                { name: 'claim(uint256)', args: (w, o) => [1, o], type: 'direct' },
-                                { name: 'claim()', args: (w, o) => [o], type: 'direct' },
-                                { name: 'mintPublic(uint256)', args: (w, o) => [1, o], type: 'direct' },
-                                { name: 'mintNFT(uint256)', args: (w, o) => [1, o], type: 'direct' },
-                                { name: 'safeMint(address,uint256)', args: (w, o) => [w.address, 1, o], type: 'direct' },
-                                { name: 'purchase(uint256)', args: (w, o) => [1, o], type: 'direct' },
-                                { name: 'buy(uint256)', args: (w, o) => [1, o], type: 'direct' },
-                            ];
-
-                            // Try direct mint functions first
                             let lastError = null;
-                            for (const mint of mintAttempts) {
+
+                            // TRY SEADROP FIRST - Many OpenSea drops use SeaDrop
+                            // SeaDrop contracts have mint() but it can only be called by SeaDrop itself
+                            addLog('info', 'Trying SeaDrop protocol first...');
+                            for (const seaDropAddr of SEADROP_ADDRESSES) {
                                 try {
-                                    tx = await contract[mint.name](...mint.args(wallet, opts));
-                                    detectedMintFn = mint;
-                                    detectedMintType = 'direct';
-                                    addLog('info', `Detected mint function: ${mint.name}`);
+                                    const seaDrop = new ethers.Contract(seaDropAddr, seaDropAbi, wallet);
+                                    tx = await seaDrop.mintPublic(task.contract, ethers.constants.AddressZero, ethers.constants.AddressZero, 1, opts);
+                                    detectedMintFn = { address: seaDropAddr };
+                                    detectedMintType = 'seadrop';
+                                    addLog('info', `Using SeaDrop at ${seaDropAddr.slice(0,10)}...`);
                                     break;
                                 } catch (e) {
                                     lastError = e;
@@ -1649,17 +1638,32 @@
                                 }
                             }
 
-                            // If no direct function worked, try SeaDrop
+                            // If SeaDrop didn't work, try direct mint functions
                             if (!tx) {
-                                for (const seaDropAddr of SEADROP_ADDRESSES) {
+                                addLog('info', 'SeaDrop failed, trying direct mint functions...');
+                                const mintAttempts = [
+                                    { name: 'mint(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                    { name: 'mint()', args: (w, o) => [o], type: 'direct' },
+                                    { name: 'publicMint(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                    { name: 'publicMint()', args: (w, o) => [o], type: 'direct' },
+                                    { name: 'claim(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                    { name: 'claim()', args: (w, o) => [o], type: 'direct' },
+                                    { name: 'mintPublic(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                    { name: 'mintNFT(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                    { name: 'safeMint(address,uint256)', args: (w, o) => [w.address, 1, o], type: 'direct' },
+                                    { name: 'purchase(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                    { name: 'buy(uint256)', args: (w, o) => [1, o], type: 'direct' },
+                                ];
+
+                                for (const mint of mintAttempts) {
                                     try {
-                                        const seaDrop = new ethers.Contract(seaDropAddr, seaDropAbi, wallet);
-                                        tx = await seaDrop.mintPublic(task.contract, ethers.constants.AddressZero, ethers.constants.AddressZero, 1, opts);
-                                        detectedMintFn = { address: seaDropAddr };
-                                        detectedMintType = 'seadrop';
-                                        addLog('info', `Using SeaDrop at ${seaDropAddr.slice(0,10)}...`);
+                                        tx = await contract[mint.name](...mint.args(wallet, opts));
+                                        detectedMintFn = mint;
+                                        detectedMintType = 'direct';
+                                        addLog('info', `Detected mint function: ${mint.name}`);
                                         break;
                                     } catch (e) {
+                                        lastError = e;
                                         continue;
                                     }
                                 }
