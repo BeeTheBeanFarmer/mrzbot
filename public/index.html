@@ -532,10 +532,10 @@
                     <div class="form-group" style="grid-column: 1 / -1;">
                         <label>Gas Presets</label>
                         <div class="btn-group" style="margin-top: 4px;">
-                            <button type="button" class="btn btn-sm gas-preset" onclick="setGasPreset('normal')">Normal</button>
-                            <button type="button" class="btn btn-sm gas-preset" onclick="setGasPreset('fast')">Fast</button>
-                            <button type="button" class="btn btn-sm gas-preset" onclick="setGasPreset('turbo')" style="background: var(--warning); border-color: var(--warning); color: #000;">Turbo</button>
-                            <button type="button" class="btn btn-sm gas-preset" onclick="setGasPreset('instant')" style="background: var(--error); border-color: var(--error); color: #fff;">Instant</button>
+                            <button type="button" class="btn btn-sm gas-preset" data-preset="normal" onclick="setGasPreset('normal', this)">Normal</button>
+                            <button type="button" class="btn btn-sm gas-preset" data-preset="fast" onclick="setGasPreset('fast', this)">Fast</button>
+                            <button type="button" class="btn btn-sm gas-preset" data-preset="turbo" onclick="setGasPreset('turbo', this)" style="background: var(--warning); border-color: var(--warning); color: #000;">Turbo</button>
+                            <button type="button" class="btn btn-sm gas-preset" data-preset="instant" onclick="setGasPreset('instant', this)" style="background: var(--error); border-color: var(--error); color: #fff;">Instant</button>
                         </div>
                     </div>
                 </div>
@@ -1227,14 +1227,14 @@
             instant: { maxFee: '200', priorityFee: '10' }
         };
 
-        function setGasPreset(preset) {
+        function setGasPreset(preset, btn) {
             const p = GAS_PRESETS[preset];
             if (!p) return;
             document.getElementById('taskMaxFee').value = p.maxFee;
             document.getElementById('taskPriorityFee').value = p.priorityFee;
             // Highlight selected preset
-            document.querySelectorAll('.gas-preset').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+            document.querySelectorAll('.gas-preset').forEach(b => b.classList.remove('active'));
+            if (btn) btn.classList.add('active');
         }
 
         // Fetch current gas prices and update presets dynamically
@@ -1498,6 +1498,7 @@
                             ];
 
                             // Try direct mint functions first
+                            let lastError = null;
                             for (const mint of mintAttempts) {
                                 try {
                                     tx = await contract[mint.name](...mint.args(wallet, opts));
@@ -1506,6 +1507,7 @@
                                     addLog('info', `Detected mint function: ${mint.name}`);
                                     break;
                                 } catch (e) {
+                                    lastError = e;
                                     continue;
                                 }
                             }
@@ -1526,26 +1528,46 @@
                                 }
                             }
 
-                            if (!tx) throw new Error('No compatible mint function found');
+                            if (!tx) {
+                                const errDetail = lastError?.reason || lastError?.message || 'unknown';
+                                throw new Error(`No mint function worked. Last error: ${errDetail}`);
+                            }
                         }
 
                         addLog('pending', `TX sent: ${w.address.slice(0,8)}...`, tx.hash);
 
-                        // Don't wait for confirmation - fire and track
-                        tx.wait().then(() => {
-                            addLog('success', `Confirmed: ${w.address.slice(0,8)}...`, tx.hash);
-                        }).catch((e) => {
-                            addLog('error', `TX failed: ${w.address.slice(0,8)}...`, tx.hash);
-                        });
+                        // Wait for confirmation with timeout
+                        try {
+                            const receipt = await Promise.race([
+                                tx.wait(1), // Wait for 1 confirmation
+                                new Promise((_, reject) => setTimeout(() => reject(new Error('TX confirmation timeout')), 60000))
+                            ]);
 
-                        task.successWallets = task.successWallets || [];
-                        task.successWallets.push(walletIdx);
-                        successCount++;
-                        stats.minted++;
-                        group.success++;
-                        updateStats();
-                        renderTasks();
-                        return true;
+                            if (receipt.status === 1) {
+                                addLog('success', `Confirmed: ${w.address.slice(0,8)}...`, tx.hash);
+                                task.successWallets = task.successWallets || [];
+                                task.successWallets.push(walletIdx);
+                                successCount++;
+                                stats.minted++;
+                                group.success++;
+                                updateStats();
+                                renderTasks();
+                                return true;
+                            } else {
+                                addLog('error', `TX reverted: ${w.address.slice(0,8)}...`, tx.hash);
+                                return false;
+                            }
+                        } catch (waitErr) {
+                            const waitMsg = waitErr.message || 'Unknown';
+                            if (waitMsg.includes('not found') || waitMsg.includes('timeout')) {
+                                addLog('error', `TX dropped/timeout: ${w.address.slice(0,8)}...`, tx.hash);
+                            } else if (waitMsg.includes('reverted') || waitMsg.includes('revert')) {
+                                addLog('error', `TX reverted: ${w.address.slice(0,8)} - ${waitMsg.slice(0,30)}`, tx.hash);
+                            } else {
+                                addLog('error', `TX failed: ${w.address.slice(0,8)} - ${waitMsg.slice(0,30)}`, tx.hash);
+                            }
+                            return false;
+                        }
                     } catch (err) {
                         const errMsg = err.reason || err.message || 'Failed';
                         if (attempt < 3 || attempt % 100 === 0) {
