@@ -1400,27 +1400,30 @@
                 results: []
             };
 
-            if (underfunded.length > 0 && funded.length > 0) {
-                // Some wallets underfunded - show modal
+            if (underfunded.length > 0) {
+                // Some or all wallets appear underfunded - show modal
                 pendingTaskData = taskData;
-                fundedWalletIndices = funded.map(c => c.idx);
+                fundedWalletIndices = funded.length > 0 ? funded.map(c => c.idx) : walletIndices; // Keep all if none funded
 
                 const list = document.getElementById('balanceCheckList');
                 list.innerHTML = underfunded.map(c => `
                     <div style="display:flex;justify-content:space-between;padding:8px;background:var(--bg-tertiary);border-radius:6px;margin-bottom:6px;font-size:0.8rem;">
                         <span style="font-family:monospace;">${c.address.slice(0,8)}...${c.address.slice(-4)}</span>
-                        <span style="color:var(--error);">${c.balance.toFixed(4)} ETH (need ${c.required.toFixed(4)})</span>
+                        <span style="color:${c.error ? 'var(--warning)' : 'var(--error)'};">${c.error ? 'Could not check' : `${c.balance.toFixed(4)} ETH`} (need ${c.required.toFixed(4)})</span>
                     </div>
                 `).join('');
 
-                document.getElementById('balanceCheckSummary').textContent = `${funded.length} of ${walletIndices.length} wallets have enough funds.`;
-                document.getElementById('balanceCheckProceed').textContent = `Mint with ${funded.length} Funded Wallet${funded.length > 1 ? 's' : ''}`;
+                if (funded.length > 0) {
+                    document.getElementById('balanceCheckSummary').textContent = `${funded.length} of ${walletIndices.length} wallets have enough funds.`;
+                    document.getElementById('balanceCheckProceed').textContent = `Mint with ${funded.length} Funded Wallet${funded.length > 1 ? 's' : ''}`;
+                    document.getElementById('balanceCheckProceed').style.display = '';
+                } else {
+                    document.getElementById('balanceCheckSummary').textContent = `Balance check may be inaccurate. You can proceed anyway.`;
+                    document.getElementById('balanceCheckProceed').textContent = `Proceed Anyway (${walletIndices.length} wallets)`;
+                    document.getElementById('balanceCheckProceed').style.display = '';
+                }
 
                 document.getElementById('balanceCheckModal').classList.add('show');
-                return;
-            } else if (underfunded.length > 0 && funded.length === 0) {
-                // All wallets underfunded
-                showNotif('error', `No wallets have enough ETH. Need ${requiredEth.toFixed(4)} ETH each.`);
                 return;
             }
 
