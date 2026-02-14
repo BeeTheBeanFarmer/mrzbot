@@ -315,6 +315,7 @@
                     <option value="42161">Arbitrum</option>
                     <option value="10">Optimism</option>
                     <option value="137">Polygon</option>
+                    <option value="6342624">MegaETH</option>
                 </select>
                 <div id="walletArea">
                     <button class="connect-btn" onclick="connectWallet()">Connect</button>
@@ -573,6 +574,7 @@
                             <option value="42161">Arbitrum</option>
                             <option value="10">Optimism</option>
                             <option value="137">Polygon</option>
+                    <option value="6342624">MegaETH</option>
                         </select>
                     </div>
                     <div class="form-group required">
@@ -794,7 +796,8 @@
             84532: { name: 'Base Sepolia', symbol: 'ETH', explorer: 'https://sepolia.basescan.org' },
             42161: { name: 'Arbitrum', symbol: 'ETH', explorer: 'https://arbiscan.io' },
             10: { name: 'Optimism', symbol: 'ETH', explorer: 'https://optimistic.etherscan.io' },
-            137: { name: 'Polygon', symbol: 'MATIC', explorer: 'https://polygonscan.com' }
+            137: { name: 'Polygon', symbol: 'MATIC', explorer: 'https://polygonscan.com' },
+            6342624: { name: 'MegaETH', symbol: 'ETH', explorer: 'https://megaexplorer.xyz' }
         };
 
         const DEFAULT_RPCS = [
@@ -808,6 +811,7 @@
             { chain: 42161, name: 'PublicNode Arb', url: 'https://arbitrum-one.publicnode.com' },
             { chain: 10, name: 'Optimism Official', url: 'https://mainnet.optimism.io' },
             { chain: 137, name: 'Polygon Official', url: 'https://polygon-rpc.com' },
+            { chain: 6342624, name: 'MegaETH Official', url: 'https://carrot.megaeth.com/rpc' },
         ];
 
         // RPC fallback helper - tries multiple RPCs for a chain
@@ -885,6 +889,218 @@
             populateRPCSelect();
         });
 
+
+        // ==================== URL PARSER ====================
+        const URL_PARSERS = {
+            'mint.fun': (url) => {
+                const match = url.match(/mint\.fun\/(\w+)\/(0x[a-fA-F0-9]{40})/);
+                if (match) {
+                    const chainMap = { 'eth': 1, 'base': 8453, 'op': 10, 'arb': 42161, 'zora': 7777777 };
+                    return { contract: match[2], chain: chainMap[match[1]] || 1 };
+                }
+                return null;
+            },
+            'zora.co': (url) => {
+                const match = url.match(/zora\.co\/collect\/(\w+):(0x[a-fA-F0-9]{40})/);
+                if (match) {
+                    const chainMap = { 'eth': 1, 'base': 8453, 'oeth': 10, 'arb': 42161, 'zora': 7777777 };
+                    return { contract: match[2], chain: chainMap[match[1]] || 1 };
+                }
+                return null;
+            },
+            'opensea.io': (url) => {
+                const match = url.match(/opensea\.io\/assets\/(\w+)\/(0x[a-fA-F0-9]{40})/);
+                if (match) {
+                    const chainMap = { 'ethereum': 1, 'base': 8453, 'arbitrum': 42161, 'optimism': 10, 'matic': 137 };
+                    return { contract: match[2], chain: chainMap[match[1]] || 1 };
+                }
+                return null;
+            },
+            'highlight.xyz': (url) => {
+                const match = url.match(/highlight\.xyz\/mint\/(\w+):(0x[a-fA-F0-9]{40})/);
+                if (match) {
+                    const chainMap = { 'eth': 1, 'base': 8453, 'op': 10, 'arb': 42161 };
+                    return { contract: match[2], chain: chainMap[match[1]] || 1 };
+                }
+                return null;
+            },
+            'generic': (url) => {
+                const match = url.match(/(0x[a-fA-F0-9]{40})/);
+                return match ? { contract: match[1], chain: null } : null;
+            }
+        };
+
+        async function parseUrl(url) {
+            try {
+                const urlObj = new URL(url);
+                const host = urlObj.hostname.replace('www.', '');
+                for (const [domain, parser] of Object.entries(URL_PARSERS)) {
+                    if (host.includes(domain)) {
+                        const result = parser(url);
+                        if (result && result.contract) return result;
+                    }
+                }
+                // Try generic parser
+                return URL_PARSERS.generic(url);
+            } catch (e) {
+                if (url.match(/^0x[a-fA-F0-9]{40}$/)) {
+                    return { contract: url, chain: null };
+                }
+            }
+            return null;
+        }
+
+        // ==================== GAS ESTIMATOR ====================
+        let gasCache = {};
+        const GAS_CACHE_TTL = 10000;
+
+        async function getGasEstimate(chainId) {
+            const cacheKey = 'gas_' + chainId;
+            const cached = gasCache[cacheKey];
+            if (cached && Date.now() - cached.timestamp < GAS_CACHE_TTL) return cached.data;
+
+            try {
+                const rpcUrl = rpcs.find(r => r.chain === chainId)?.url || DEFAULT_RPCS[0].url;
+                const provider = new ethers.providers.StaticJsonRpcProvider(rpcUrl, chainId);
+                const feeData = await provider.getFeeData();
+                const block = await provider.getBlock('latest');
+                
+                const gasPrice = feeData.gasPrice ? parseFloat(ethers.utils.formatUnits(feeData.gasPrice, 'gwei')) : 0;
+                const baseFee = block.baseFeePerGas ? parseFloat(ethers.utils.formatUnits(block.baseFeePerGas, 'gwei')) : gasPrice * 0.8;
+
+                const estimate = {
+                    baseFee: baseFee.toFixed(2),
+                    slow: { maxFee: (baseFee * 1.1).toFixed(2), priority: '1', time: '~2-5 min' },
+                    medium: { maxFee: (baseFee * 1.25).toFixed(2), priority: '1.5', time: '~30-60 sec' },
+                    fast: { maxFee: (baseFee * 1.5).toFixed(2), priority: '2', time: '~15 sec' },
+                    turbo: { maxFee: (baseFee * 2).toFixed(2), priority: '3', time: 'ASAP' }
+                };
+                gasCache[cacheKey] = { data: estimate, timestamp: Date.now() };
+                return estimate;
+            } catch (e) {
+                return {
+                    baseFee: '?', slow: { maxFee: '20', priority: '1', time: '~2-5 min' },
+                    medium: { maxFee: '30', priority: '1.5', time: '~30-60 sec' },
+                    fast: { maxFee: '50', priority: '2', time: '~15 sec' },
+                    turbo: { maxFee: '100', priority: '3', time: 'ASAP' }
+                };
+            }
+        }
+
+        let selectedGasPreset = 'fast';
+        function selectGasPreset(preset) {
+            selectedGasPreset = preset;
+            document.querySelectorAll('.gas-preset').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.preset === preset);
+            });
+            if (preset !== 'custom') {
+                applyGasPreset(preset);
+            }
+        }
+
+        async function applyGasPreset(preset) {
+            const chainId = parseInt(document.getElementById('taskChain')?.value || currentNetwork);
+            const estimates = await getGasEstimate(chainId);
+            if (estimates[preset]) {
+                document.getElementById('taskMaxFee').value = estimates[preset].maxFee;
+                document.getElementById('taskPriority').value = estimates[preset].priority;
+            }
+        }
+
+        // ==================== CONTRACT SCANNER ====================
+        const SCANNER_ABI = [
+            'function totalSupply() view returns (uint256)',
+            'function maxSupply() view returns (uint256)',
+            'function MAX_SUPPLY() view returns (uint256)',
+            'function mintPrice() view returns (uint256)',
+            'function price() view returns (uint256)',
+            'function cost() view returns (uint256)',
+            'function maxPerWallet() view returns (uint256)',
+            'function name() view returns (string)',
+            'function symbol() view returns (string)',
+            'function saleIsActive() view returns (bool)',
+            'function isPublicSaleActive() view returns (bool)'
+        ];
+
+        async function scanContract(contractAddress, chainId) {
+            try {
+                const rpcUrl = rpcs.find(r => r.chain === chainId)?.url || DEFAULT_RPCS[0].url;
+                const provider = new ethers.providers.StaticJsonRpcProvider(rpcUrl, chainId);
+                const contract = new ethers.Contract(contractAddress, SCANNER_ABI, provider);
+                
+                const tryCall = async (fn) => { try { return await fn(); } catch { return null; } };
+                
+                const [name, totalSupply, maxSupply1, maxSupply2, price1, price2, price3, maxWallet, sale1, sale2] = 
+                    await Promise.all([
+                        tryCall(() => contract.name()),
+                        tryCall(() => contract.totalSupply()),
+                        tryCall(() => contract.maxSupply()),
+                        tryCall(() => contract.MAX_SUPPLY()),
+                        tryCall(() => contract.mintPrice()),
+                        tryCall(() => contract.price()),
+                        tryCall(() => contract.cost()),
+                        tryCall(() => contract.maxPerWallet()),
+                        tryCall(() => contract.saleIsActive()),
+                        tryCall(() => contract.isPublicSaleActive())
+                    ]);
+
+                const mintPrice = price1 || price2 || price3;
+                return {
+                    name, totalSupply: totalSupply?.toString(),
+                    maxSupply: (maxSupply1 || maxSupply2)?.toString(),
+                    mintPrice: mintPrice ? ethers.utils.formatEther(mintPrice) : null,
+                    maxPerWallet: maxWallet?.toString(),
+                    saleActive: sale1 ?? sale2
+                };
+            } catch (e) {
+                return { error: e.message };
+            }
+        }
+
+        function renderContractInfo(info) {
+            const container = document.getElementById('contractScanResult');
+            if (!container) return;
+            if (info.error) {
+                container.innerHTML = '<div style="color: var(--error); font-size: 0.8rem;">❌ Could not scan contract</div>';
+                return;
+            }
+            const remaining = info.maxSupply && info.totalSupply ? parseInt(info.maxSupply) - parseInt(info.totalSupply) : null;
+            container.innerHTML = 
+                '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; font-size: 0.75rem; padding: 10px; background: var(--bg-tertiary); border-radius: 6px; margin-top: 8px;">' +
+                (info.name ? '<div><span style="color: var(--text-muted);">Name:</span> ' + info.name + '</div>' : '') +
+                (info.mintPrice ? '<div><span style="color: var(--text-muted);">Price:</span> ' + info.mintPrice + ' ETH</div>' : '') +
+                (info.totalSupply ? '<div><span style="color: var(--text-muted);">Minted:</span> ' + info.totalSupply + (info.maxSupply ? ' / ' + info.maxSupply : '') + '</div>' : '') +
+                (remaining !== null ? '<div><span style="color: var(--text-muted);">Left:</span> <span style="color: ' + (remaining > 0 ? 'var(--success)' : 'var(--error)') + '">' + remaining + '</span></div>' : '') +
+                (info.saleActive !== null ? '<div><span style="color: var(--text-muted);">Sale:</span> <span style="color: ' + (info.saleActive ? 'var(--success)' : 'var(--error)') + '">' + (info.saleActive ? '✓ Live' : '✗ Not Live') + '</span></div>' : '') +
+                '</div>';
+        }
+
+        // Auto-scan when contract input changes
+        let scanTimeout = null;
+        function onContractInput(value) {
+            clearTimeout(scanTimeout);
+            scanTimeout = setTimeout(async () => {
+                // Try to parse as URL first
+                const parsed = await parseUrl(value);
+                if (parsed) {
+                    document.getElementById('taskContract').value = parsed.contract;
+                    if (parsed.chain) {
+                        document.getElementById('taskChain').value = parsed.chain;
+                        updateRpcForChain();
+                    }
+                    value = parsed.contract;
+                }
+                // Scan the contract
+                if (value.match(/^0x[a-fA-F0-9]{40}$/)) {
+                    const chainId = parseInt(document.getElementById('taskChain').value);
+                    const info = await scanContract(value, chainId);
+                    renderContractInfo(info);
+                    if (info.mintPrice && !document.getElementById('taskValue').value) {
+                        document.getElementById('taskValue').value = info.mintPrice;
+                    }
+                }
+            }, 500);
+        }
         // ==================== TASK GROUPS ====================
         function showCreateGroupModal() {
             document.getElementById('groupName').value = '';
