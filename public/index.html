@@ -950,6 +950,522 @@
             return null;
         }
 
+
+        // ==================== EXTENDED LAUNCHPAD PARSERS ====================
+        const LAUNCHPAD_PARSERS = {
+            // OpenSea - multiple URL formats
+            'opensea.io': async (url) => {
+                // /assets/ethereum/0x.../tokenId
+                let match = url.match(/opensea\.io\/assets\/(\w+)\/(0x[a-fA-F0-9]{40})/);
+                if (match) {
+                    const chainMap = { 'ethereum': 1, 'base': 8453, 'arbitrum': 42161, 'optimism': 10, 'matic': 137, 'polygon': 137 };
+                    return { contract: match[2], chain: chainMap[match[1]] || 1, platform: 'opensea' };
+                }
+                // /collection/name format - need to fetch page
+                match = url.match(/opensea\.io\/collection\/([\w-]+)/);
+                if (match) {
+                    return { collectionSlug: match[1], platform: 'opensea', needsFetch: true };
+                }
+                return null;
+            },
+
+            // Manifold
+            'manifold.xyz': (url) => {
+                const match = url.match(/manifold\.xyz\/c\/(0x[a-fA-F0-9]{40})/);
+                if (match) return { contract: match[1], chain: 1, platform: 'manifold' };
+                // Gallery format
+                const match2 = url.match(/gallery\.manifold\.xyz\/(\w+)/);
+                if (match2) return { galleryId: match2[1], platform: 'manifold', needsFetch: true };
+                return null;
+            },
+
+            // Sound.xyz
+            'sound.xyz': (url) => {
+                const match = url.match(/sound\.xyz\/([\w-]+)\/([\w-]+)/);
+                if (match) return { artist: match[1], release: match[2], platform: 'sound', needsFetch: true };
+                return null;
+            },
+
+            // Foundation
+            'foundation.app': (url) => {
+                const match = url.match(/foundation\.app\/mint\/(0x[a-fA-F0-9]{40})/);
+                if (match) return { contract: match[1], chain: 1, platform: 'foundation' };
+                const match2 = url.match(/foundation\.app\/@[\w-]+\/([\w-]+)/);
+                if (match2) return { slug: match2[1], platform: 'foundation', needsFetch: true };
+                return null;
+            },
+
+            // Rarible
+            'rarible.com': (url) => {
+                const match = url.match(/rarible\.com\/token\/([\w:]+):(0x[a-fA-F0-9]{40})/);
+                if (match) {
+                    const chainMap = { 'ethereum': 1, 'base': 8453, 'polygon': 137 };
+                    return { contract: match[2], chain: chainMap[match[1]] || 1, platform: 'rarible' };
+                }
+                return null;
+            },
+
+            // Mint.fun
+            'mint.fun': (url) => {
+                const match = url.match(/mint\.fun\/([\w-]+)\/(0x[a-fA-F0-9]{40})/);
+                if (match) {
+                    const chainMap = { 'eth': 1, 'base': 8453, 'op': 10, 'arb': 42161, 'zora': 7777777, 'blast': 81457 };
+                    return { contract: match[2], chain: chainMap[match[1]] || 1, platform: 'mintfun' };
+                }
+                return null;
+            },
+
+            // Zora
+            'zora.co': (url) => {
+                const match = url.match(/zora\.co\/collect\/([\w]+):(0x[a-fA-F0-9]{40})/);
+                if (match) {
+                    const chainMap = { 'eth': 1, 'base': 8453, 'oeth': 10, 'arb': 42161, 'zora': 7777777, 'blast': 81457 };
+                    return { contract: match[2], chain: chainMap[match[1]] || 1, platform: 'zora' };
+                }
+                return null;
+            },
+
+            // Highlight
+            'highlight.xyz': (url) => {
+                const match = url.match(/highlight\.xyz\/mint\/([\w]+):(0x[a-fA-F0-9]{40})/);
+                if (match) {
+                    const chainMap = { 'eth': 1, 'base': 8453, 'op': 10, 'arb': 42161, 'zora': 7777777 };
+                    return { contract: match[2], chain: chainMap[match[1]] || 1, platform: 'highlight' };
+                }
+                return null;
+            },
+
+            // Titles.xyz
+            'titles.xyz': (url) => {
+                const match = url.match(/titles\.xyz\/[\w-]+\/(0x[a-fA-F0-9]{40})/);
+                if (match) return { contract: match[1], chain: 8453, platform: 'titles' }; // Usually Base
+                return null;
+            },
+
+            // Generic fallback
+            'generic': (url) => {
+                const match = url.match(/(0x[a-fA-F0-9]{40})/);
+                return match ? { contract: match[1], chain: null, platform: 'unknown' } : null;
+            }
+        };
+
+        async function parseUrlAdvanced(url) {
+            try {
+                const urlObj = new URL(url);
+                const host = urlObj.hostname.replace('www.', '');
+                
+                for (const [domain, parser] of Object.entries(LAUNCHPAD_PARSERS)) {
+                    if (host.includes(domain)) {
+                        const result = typeof parser === 'function' ? await parser(url) : parser(url);
+                        if (result) return result;
+                    }
+                }
+                // Fallback to generic
+                return LAUNCHPAD_PARSERS.generic(url);
+            } catch (e) {
+                // Not a URL - check if raw address
+                if (url.match(/^0x[a-fA-F0-9]{40}$/)) {
+                    return { contract: url, chain: null, platform: 'direct' };
+                }
+            }
+            return null;
+        }
+
+        // ==================== CONTRACT ABI DETECTION ====================
+        // Common mint function signatures to detect
+        const MINT_SIGNATURES = {
+            // Standard mints
+            'mint(uint256)': { sig: '0xa0712d68', hasQty: true, hasPrice: false },
+            'mint()': { sig: '0x1249c58b', hasQty: false, hasPrice: false },
+            'publicMint(uint256)': { sig: '0x2db11544', hasQty: true, hasPrice: false },
+            'claim(uint256)': { sig: '0x379607f5', hasQty: true, hasPrice: false },
+            'purchase(uint256)': { sig: '0xefef39a1', hasQty: true, hasPrice: false },
+            
+            // With address
+            'safeMint(address,uint256)': { sig: '0xa1448194', hasQty: true, needsAddress: true },
+            'mintTo(address,uint256)': { sig: '0x449a52f8', hasQty: true, needsAddress: true },
+            
+            // Allowlist/Whitelist
+            'allowlistMint(uint256,bytes32[])': { sig: '0x0d318c7a', hasQty: true, needsProof: true },
+            'whitelistMint(uint256,bytes32[])': { sig: null, hasQty: true, needsProof: true },
+            'mintAllowList(uint256,bytes32[],bytes32)': { sig: null, hasQty: true, needsProof: true },
+        };
+
+        // Detect available mint functions on a contract
+        async function detectMintFunctions(contractAddress, chainId) {
+            const rpcUrl = rpcs.find(r => r.chain === chainId)?.url || DEFAULT_RPCS[0].url;
+            const provider = new ethers.providers.StaticJsonRpcProvider(rpcUrl, chainId);
+            
+            const detected = [];
+            
+            // Check for common mint function selectors by calling with 0 gas (dry run)
+            const testAbi = [
+                'function mint(uint256) payable',
+                'function mint() payable', 
+                'function publicMint(uint256) payable',
+                'function claim(uint256) payable',
+                'function purchase(uint256) payable',
+                'function safeMint(address,uint256) payable',
+                'function mintTo(address,uint256) payable',
+                'function allowlistMint(uint256,bytes32[]) payable',
+                'function mintPublic(uint256) payable',
+                'function mintNFT(uint256) payable',
+                'function buy(uint256) payable'
+            ];
+
+            const contract = new ethers.Contract(contractAddress, testAbi, provider);
+            
+            for (const func of Object.keys(contract.functions)) {
+                // Skip duplicate signatures
+                if (func.includes('(')) {
+                    detected.push(func);
+                }
+            }
+
+            // Try to estimate gas to see which functions are actually callable
+            const callable = [];
+            for (const func of detected) {
+                try {
+                    // Try a static call simulation
+                    const fragment = contract.interface.getFunction(func);
+                    const args = fragment.inputs.map(input => {
+                        if (input.type === 'uint256') return 1;
+                        if (input.type === 'address') return contractAddress;
+                        if (input.type === 'bytes32[]') return [];
+                        return ethers.constants.AddressZero;
+                    });
+                    
+                    await contract.estimateGas[func](...args, { value: ethers.utils.parseEther('0.1') });
+                    callable.push({ name: func, args: fragment.inputs.length, likely: true });
+                } catch (e) {
+                    // Function exists but might need payment or conditions
+                    callable.push({ name: func, args: 0, likely: false, error: e.message?.slice(0, 50) });
+                }
+            }
+
+            return callable;
+        }
+
+        // ==================== MONITORING MODE ====================
+        let monitors = {};
+
+        async function startMonitor(monitorId, contractAddress, chainId, options = {}) {
+            const { 
+                checkInterval = 5000,  // 5 seconds
+                onLive = null,
+                onUpdate = null,
+                maxChecks = 1000,  // ~1.4 hours at 5s intervals
+                autoMint = false,
+                walletGroup = null
+            } = options;
+
+            if (monitors[monitorId]) {
+                console.log('Monitor already running:', monitorId);
+                return;
+            }
+
+            monitors[monitorId] = {
+                active: true,
+                contractAddress,
+                chainId,
+                checkCount: 0,
+                lastStatus: null,
+                startTime: Date.now()
+            };
+
+            addLog('info', `🔍 Started monitoring ${contractAddress.slice(0,10)}... on chain ${chainId}`);
+
+            const runCheck = async () => {
+                if (!monitors[monitorId]?.active) return;
+
+                try {
+                    const info = await scanContract(contractAddress, chainId);
+                    monitors[monitorId].checkCount++;
+                    monitors[monitorId].lastCheck = Date.now();
+                    monitors[monitorId].lastInfo = info;
+
+                    // Check if sale is now active
+                    const wasInactive = monitors[monitorId].lastStatus === false;
+                    const isNowActive = info.saleActive === true;
+
+                    if (onUpdate) onUpdate(info, monitors[monitorId]);
+
+                    if (isNowActive && wasInactive) {
+                        addLog('success', `🚨 MINT IS LIVE! ${info.name || contractAddress.slice(0,10)}...`);
+                        showNotif('success', '🚨 MINT IS LIVE! ' + (info.name || 'Contract'));
+                        
+                        if (onLive) onLive(info);
+                        
+                        if (autoMint && walletGroup) {
+                            // Trigger auto-mint
+                            addLog('info', '⚡ Auto-minting...');
+                            // Create and run task immediately
+                            await triggerAutoMint(contractAddress, chainId, walletGroup, info.mintPrice);
+                        }
+                    }
+
+                    monitors[monitorId].lastStatus = info.saleActive;
+
+                    // Continue monitoring if still active and under limit
+                    if (monitors[monitorId].active && monitors[monitorId].checkCount < maxChecks) {
+                        setTimeout(runCheck, checkInterval);
+                    } else if (monitors[monitorId].checkCount >= maxChecks) {
+                        addLog('warning', `Monitor ${monitorId} reached max checks (${maxChecks})`);
+                        stopMonitor(monitorId);
+                    }
+                } catch (e) {
+                    addLog('error', `Monitor error: ${e.message}`);
+                    if (monitors[monitorId]?.active) {
+                        setTimeout(runCheck, checkInterval * 2); // Backoff on error
+                    }
+                }
+            };
+
+            // Start first check
+            runCheck();
+            return monitorId;
+        }
+
+        function stopMonitor(monitorId) {
+            if (monitors[monitorId]) {
+                monitors[monitorId].active = false;
+                addLog('info', `Stopped monitor ${monitorId}`);
+                delete monitors[monitorId];
+            }
+        }
+
+        function stopAllMonitors() {
+            Object.keys(monitors).forEach(id => stopMonitor(id));
+        }
+
+        async function triggerAutoMint(contractAddress, chainId, walletGroupId, mintPrice) {
+            const targetWallets = walletGroupId === 'all' 
+                ? wallets.map((_, i) => i)
+                : wallets.map((w, i) => w.group === walletGroupId ? i : null).filter(i => i !== null);
+
+            if (targetWallets.length === 0) {
+                addLog('error', 'No wallets in group for auto-mint');
+                return;
+            }
+
+            const rpcUrl = rpcs.find(r => r.chain === chainId)?.url || DEFAULT_RPCS[0].url;
+            
+            // Create auto task
+            const autoTask = {
+                id: 'auto_' + Date.now(),
+                groupId: 'auto',
+                contract: contractAddress,
+                chain: chainId,
+                rpc: rpcUrl,
+                value: mintPrice || '0',
+                wallets: targetWallets,
+                gasLimit: 300000,
+                maxFee: null, // Will use current gas
+                priorityFee: '3', // High priority for speed
+                status: 'pending',
+                simulate: true,
+                startTime: null,
+                hex: null
+            };
+
+            tasks.push(autoTask);
+            runTask(autoTask.id);
+        }
+
+        // ==================== BATCH SCHEDULER ====================
+        let scheduledBatches = [];
+
+        function scheduleBatchMint(config) {
+            const {
+                name,
+                contract,
+                chain,
+                walletGroup,
+                mintPrice,
+                startTime,  // ISO string or Date
+                batchSize = 10,  // Wallets per batch
+                batchDelay = 1000,  // ms between batches
+                maxPerWallet = 1,
+                totalMints = null  // null = all wallets
+            } = config;
+
+            const batch = {
+                id: 'batch_' + Date.now(),
+                name,
+                contract,
+                chain,
+                walletGroup,
+                mintPrice,
+                startTime: new Date(startTime).getTime(),
+                batchSize,
+                batchDelay,
+                maxPerWallet,
+                totalMints,
+                status: 'scheduled',
+                completedBatches: 0,
+                successCount: 0,
+                failCount: 0,
+                createdAt: Date.now()
+            };
+
+            scheduledBatches.push(batch);
+            saveBatchSchedule();
+
+            const timeUntilStart = batch.startTime - Date.now();
+            if (timeUntilStart > 0) {
+                addLog('info', `📅 Scheduled batch "${name}" for ${new Date(batch.startTime).toLocaleString()}`);
+                setTimeout(() => executeBatch(batch.id), timeUntilStart);
+            } else {
+                addLog('warning', `Start time is in the past, executing immediately`);
+                executeBatch(batch.id);
+            }
+
+            return batch.id;
+        }
+
+        async function executeBatch(batchId) {
+            const batch = scheduledBatches.find(b => b.id === batchId);
+            if (!batch || batch.status === 'completed' || batch.status === 'cancelled') return;
+
+            batch.status = 'running';
+            addLog('info', `🚀 Starting batch "${batch.name}"`);
+
+            const targetWallets = batch.walletGroup === 'all'
+                ? wallets
+                : wallets.filter(w => w.group === batch.walletGroup);
+
+            const walletsToMint = batch.totalMints 
+                ? targetWallets.slice(0, batch.totalMints)
+                : targetWallets;
+
+            const rpcUrl = rpcs.find(r => r.chain === batch.chain)?.url || DEFAULT_RPCS[0].url;
+            const provider = new ethers.providers.StaticJsonRpcProvider(rpcUrl, batch.chain);
+
+            // Split into batches
+            for (let i = 0; i < walletsToMint.length; i += batch.batchSize) {
+                if (batch.status === 'cancelled') break;
+
+                const currentBatch = walletsToMint.slice(i, i + batch.batchSize);
+                batch.completedBatches++;
+
+                addLog('info', `Batch ${batch.completedBatches}: Minting with ${currentBatch.length} wallets`);
+
+                // Execute batch
+                const results = await Promise.allSettled(
+                    currentBatch.map(async (w) => {
+                        const wallet = new ethers.Wallet(w.pk, provider);
+                        const contract = new ethers.Contract(batch.contract, [
+                            'function mint(uint256) payable',
+                            'function mint() payable',
+                            'function publicMint(uint256) payable'
+                        ], wallet);
+
+                        const value = ethers.utils.parseEther(batch.mintPrice || '0');
+
+                        // Try different mint functions
+                        try {
+                            const tx = await contract['mint(uint256)'](batch.maxPerWallet, { value, gasLimit: 300000 });
+                            await tx.wait();
+                            return { success: true, hash: tx.hash };
+                        } catch {
+                            try {
+                                const tx = await contract['mint()']({ value, gasLimit: 300000 });
+                                await tx.wait();
+                                return { success: true, hash: tx.hash };
+                            } catch (e) {
+                                throw e;
+                            }
+                        }
+                    })
+                );
+
+                // Count results
+                results.forEach(r => {
+                    if (r.status === 'fulfilled' && r.value?.success) {
+                        batch.successCount++;
+                    } else {
+                        batch.failCount++;
+                    }
+                });
+
+                // Delay before next batch
+                if (i + batch.batchSize < walletsToMint.length) {
+                    await new Promise(r => setTimeout(r, batch.batchDelay));
+                }
+            }
+
+            batch.status = 'completed';
+            batch.completedAt = Date.now();
+            saveBatchSchedule();
+
+            addLog('success', `✅ Batch "${batch.name}" completed: ${batch.successCount} success, ${batch.failCount} failed`);
+            showNotif('success', `Batch complete: ${batch.successCount}/${batch.successCount + batch.failCount}`);
+        }
+
+        function cancelBatch(batchId) {
+            const batch = scheduledBatches.find(b => b.id === batchId);
+            if (batch && batch.status !== 'completed') {
+                batch.status = 'cancelled';
+                addLog('info', `Cancelled batch "${batch.name}"`);
+            }
+        }
+
+        function saveBatchSchedule() {
+            localStorage.setItem('mrzbot_batches', JSON.stringify(scheduledBatches));
+        }
+
+        function loadBatchSchedule() {
+            try {
+                const saved = localStorage.getItem('mrzbot_batches');
+                if (saved) {
+                    scheduledBatches = JSON.parse(saved);
+                    // Reschedule pending batches
+                    scheduledBatches.filter(b => b.status === 'scheduled').forEach(b => {
+                        const timeUntil = b.startTime - Date.now();
+                        if (timeUntil > 0) {
+                            setTimeout(() => executeBatch(b.id), timeUntil);
+                        }
+                    });
+                }
+            } catch (e) {
+                console.error('Failed to load batch schedule:', e);
+            }
+        }
+
+        // ==================== UI: MONITOR PANEL ====================
+        function renderMonitorPanel() {
+            const container = document.getElementById('monitorPanel');
+            if (!container) return;
+
+            const activeMonitors = Object.entries(monitors);
+            
+            if (activeMonitors.length === 0) {
+                container.innerHTML = '<div style="color: var(--text-muted); padding: 20px; text-align: center;">No active monitors</div>';
+                return;
+            }
+
+            container.innerHTML = activeMonitors.map(([id, m]) => `
+                <div class="monitor-item" style="background: var(--bg-tertiary); padding: 12px; border-radius: 8px; margin-bottom: 8px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <div style="font-weight: 500;">${m.contractAddress.slice(0,10)}...</div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted);">
+                                Chain: ${NETWORKS[m.chainId]?.name || m.chainId} · 
+                                Checks: ${m.checkCount} · 
+                                Status: <span style="color: ${m.lastStatus ? 'var(--success)' : 'var(--warning)'}">${m.lastStatus ? '🟢 Live' : '🟡 Waiting'}</span>
+                            </div>
+                        </div>
+                        <button class="btn btn-sm btn-danger" onclick="stopMonitor('${id}')">Stop</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Update monitors panel every 5 seconds
+        setInterval(renderMonitorPanel, 5000);
+
+        // Load batches on init
+        loadBatchSchedule();
         // ==================== GAS ESTIMATOR ====================
         let gasCache = {};
         const GAS_CACHE_TTL = 10000;
@@ -2546,6 +3062,279 @@
             renderLogs();
             updateStats();
         }
+        // ==================== MONITOR UI HANDLERS ====================
+        function showAddMonitorModal() {
+            // Populate wallet groups
+            const select = document.getElementById('monitorWalletGroup');
+            select.innerHTML = '<option value="all">All Wallets</option>' + 
+                walletGroups.map(g => '<option value="' + g.id + '">' + g.name + '</option>').join('');
+            
+            document.getElementById('monitorContract').value = '';
+            document.getElementById('addMonitorModal').classList.add('show');
+            
+            // Toggle auto-mint options
+            document.getElementById('autoMintToggle').onclick = function() {
+                this.classList.toggle('active');
+                document.getElementById('autoMintOptions').style.display = 
+                    this.classList.contains('active') ? 'block' : 'none';
+            };
+        }
+
+        async function addMonitor() {
+            const input = document.getElementById('monitorContract').value.trim();
+            const chainId = parseInt(document.getElementById('monitorChain').value);
+            const interval = parseInt(document.getElementById('monitorInterval').value);
+            const autoMint = document.getElementById('autoMintToggle').classList.contains('active');
+            const walletGroup = autoMint ? document.getElementById('monitorWalletGroup').value : null;
+
+            if (!input) return showNotif('error', 'Enter contract address or URL');
+
+            // Parse URL if needed
+            let contract = input;
+            let detectedChain = chainId;
+            
+            if (input.startsWith('http')) {
+                const parsed = await parseUrlAdvanced(input);
+                if (parsed && parsed.contract) {
+                    contract = parsed.contract;
+                    if (parsed.chain) detectedChain = parsed.chain;
+                } else {
+                    return showNotif('error', 'Could not extract contract from URL');
+                }
+            }
+
+            if (!ethers.utils.isAddress(contract)) {
+                return showNotif('error', 'Invalid contract address');
+            }
+
+            const monitorId = 'mon_' + Date.now();
+            startMonitor(monitorId, contract, detectedChain, {
+                checkInterval: interval,
+                autoMint: autoMint,
+                walletGroup: walletGroup,
+                onUpdate: (info) => renderMonitorPanel()
+            });
+
+            closeModal('addMonitorModal');
+            showNotif('success', 'Monitor started');
+            showPage('monitor');
+        }
+
+        // ==================== BATCH SCHEDULE UI HANDLERS ====================
+        function showScheduleBatchModal() {
+            // Populate wallet groups
+            const select = document.getElementById('batchWalletGroup');
+            select.innerHTML = '<option value="all">All Wallets</option>' + 
+                walletGroups.map(g => '<option value="' + g.id + '">' + g.name + '</option>').join('');
+            
+            // Default start time to 5 minutes from now
+            const defaultTime = new Date(Date.now() + 5 * 60 * 1000);
+            document.getElementById('batchStartTime').value = defaultTime.toISOString().slice(0, 16);
+            
+            document.getElementById('batchName').value = '';
+            document.getElementById('batchContract').value = '';
+            document.getElementById('scheduleBatchModal').classList.add('show');
+        }
+
+        function createScheduledBatch() {
+            const name = document.getElementById('batchName').value.trim();
+            const contract = document.getElementById('batchContract').value.trim();
+            const chain = parseInt(document.getElementById('batchChain').value);
+            const walletGroup = document.getElementById('batchWalletGroup').value;
+            const mintPrice = document.getElementById('batchPrice').value || '0';
+            const startTime = document.getElementById('batchStartTime').value;
+            const batchSize = parseInt(document.getElementById('batchSize').value) || 10;
+            const batchDelay = parseInt(document.getElementById('batchDelay').value) || 1000;
+            const maxPerWallet = parseInt(document.getElementById('batchPerWallet').value) || 1;
+
+            if (!name) return showNotif('error', 'Enter batch name');
+            if (!ethers.utils.isAddress(contract)) return showNotif('error', 'Invalid contract address');
+            if (!startTime) return showNotif('error', 'Select start time');
+
+            scheduleBatchMint({
+                name,
+                contract,
+                chain,
+                walletGroup,
+                mintPrice,
+                startTime,
+                batchSize,
+                batchDelay,
+                maxPerWallet
+            });
+
+            closeModal('scheduleBatchModal');
+            showNotif('success', 'Batch scheduled');
+            showPage('monitor');
+            renderBatchPanel();
+        }
+
+        function renderBatchPanel() {
+            const container = document.getElementById('batchPanel');
+            if (!container) return;
+
+            if (scheduledBatches.length === 0) {
+                container.innerHTML = '<div style="color: var(--text-muted); padding: 20px; text-align: center;">No scheduled batches</div>';
+                return;
+            }
+
+            container.innerHTML = scheduledBatches.map(b => {
+                const statusColors = {
+                    'scheduled': 'var(--warning)',
+                    'running': 'var(--accent)',
+                    'completed': 'var(--success)',
+                    'cancelled': 'var(--error)'
+                };
+                const statusIcons = {
+                    'scheduled': '⏰',
+                    'running': '🔄',
+                    'completed': '✅',
+                    'cancelled': '❌'
+                };
+                
+                return '<div style="background: var(--bg-tertiary); padding: 12px; border-radius: 8px; margin-bottom: 8px;">' +
+                    '<div style="display: flex; justify-content: space-between; align-items: center;">' +
+                        '<div>' +
+                            '<div style="font-weight: 500;">' + b.name + '</div>' +
+                            '<div style="font-size: 0.75rem; color: var(--text-muted);">' +
+                                NETWORKS[b.chain]?.name + ' · ' + 
+                                b.contract.slice(0,10) + '... · ' +
+                                '<span style="color: ' + statusColors[b.status] + '">' + statusIcons[b.status] + ' ' + b.status + '</span>' +
+                                (b.status === 'scheduled' ? ' · Starts: ' + new Date(b.startTime).toLocaleString() : '') +
+                                (b.status === 'running' || b.status === 'completed' ? ' · ' + b.successCount + '/' + (b.successCount + b.failCount) : '') +
+                            '</div>' +
+                        '</div>' +
+                        (b.status === 'scheduled' || b.status === 'running' ? 
+                            '<button class="btn btn-sm btn-danger" onclick="cancelBatch(\'' + b.id + '\'); renderBatchPanel();">Cancel</button>' : '') +
+                    '</div>' +
+                '</div>';
+            }).join('');
+        }
+
+        // Update batch panel periodically
+        setInterval(renderBatchPanel, 5000);
     </script>
 </body>
+    <!-- Add Monitor Modal -->
+    <div class="modal-overlay" id="addMonitorModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Add Monitor</h3>
+                <button class="modal-close" onclick="closeModal('addMonitorModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group" style="margin-bottom: 12px;">
+                    <label>Contract Address or URL</label>
+                    <input type="text" id="monitorContract" placeholder="0x... or https://mint.fun/...">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Chain</label>
+                        <select id="monitorChain">
+                            <option value="1">Ethereum</option>
+                            <option value="8453">Base</option>
+                            <option value="6342624">MegaETH</option>
+                            <option value="42161">Arbitrum</option>
+                            <option value="10">Optimism</option>
+                            <option value="137">Polygon</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Check Interval</label>
+                        <select id="monitorInterval">
+                            <option value="3000">3 seconds</option>
+                            <option value="5000" selected>5 seconds</option>
+                            <option value="10000">10 seconds</option>
+                            <option value="30000">30 seconds</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-top: 12px;">
+                    <div class="toggle" onclick="this.classList.toggle('active')" id="autoMintToggle">
+                        <div class="toggle-track"></div>
+                        <span class="toggle-label">Auto-mint when live</span>
+                    </div>
+                </div>
+                <div id="autoMintOptions" style="display: none; margin-top: 12px;">
+                    <div class="form-group">
+                        <label>Wallet Group</label>
+                        <select id="monitorWalletGroup">
+                            <option value="all">All Wallets</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeModal('addMonitorModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="addMonitor()">Start Monitoring</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Schedule Batch Modal -->
+    <div class="modal-overlay" id="scheduleBatchModal">
+        <div class="modal" style="max-width: 550px;">
+            <div class="modal-header">
+                <h3>Schedule Batch Mint</h3>
+                <button class="modal-close" onclick="closeModal('scheduleBatchModal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group" style="margin-bottom: 12px;">
+                    <label>Batch Name</label>
+                    <input type="text" id="batchName" placeholder="e.g. Azuki Mint">
+                </div>
+                <div class="form-group" style="margin-bottom: 12px;">
+                    <label>Contract Address</label>
+                    <input type="text" id="batchContract" placeholder="0x...">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Chain</label>
+                        <select id="batchChain">
+                            <option value="1">Ethereum</option>
+                            <option value="8453">Base</option>
+                            <option value="6342624">MegaETH</option>
+                            <option value="42161">Arbitrum</option>
+                            <option value="10">Optimism</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Wallet Group</label>
+                        <select id="batchWalletGroup">
+                            <option value="all">All Wallets</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Mint Price (ETH)</label>
+                        <input type="text" id="batchPrice" placeholder="0" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label>Mints Per Wallet</label>
+                        <input type="number" id="batchPerWallet" value="1" min="1">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Start Time</label>
+                        <input type="datetime-local" id="batchStartTime">
+                    </div>
+                    <div class="form-group">
+                        <label>Batch Size</label>
+                        <input type="number" id="batchSize" value="10" min="1" max="50">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Batch Delay (ms)</label>
+                    <input type="number" id="batchDelay" value="1000" min="100">
+                    <small style="color: var(--text-muted); font-size: 0.7rem;">Delay between batches to avoid rate limits</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeModal('scheduleBatchModal')">Cancel</button>
+                <button class="btn btn-primary" onclick="createScheduledBatch()">Schedule</button>
+            </div>
+        </div>
+    </div>
 </html>
